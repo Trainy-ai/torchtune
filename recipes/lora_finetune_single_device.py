@@ -8,16 +8,19 @@ import os
 import sys
 import time
 
+# from datasets import load_dataset
+# from transformers import AutoTokenizer
+
 from functools import partial
 from typing import Any, Dict, Optional, Tuple
 from warnings import warn
 
 import torch
 from omegaconf import DictConfig, ListConfig
-
+import numpy as np
 from torch import nn
 from torch.optim import Optimizer
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, SubsetRandomSampler
 from torchtune import config, modules, utils
 from torchtune.datasets import ConcatDataset
 from torchtune.modules.peft.peft_utils import (
@@ -29,6 +32,18 @@ from torchtune.modules.peft.peft_utils import (
 )
 from torchtune.recipe_interfaces import FTRecipeInterface
 from tqdm import tqdm
+import wandb
+wandb.init(
+    # set the wandb project where this run will be logged
+    project="torchtune",
+    name = "batch:2 epoch:5 lr:3e-4 samsum",
+
+    # track hyperparameters and run metadata
+    config={
+    "epochs": 5,
+    "batch-size": 10,
+    }
+)
 
 log = utils.get_logger("DEBUG")
 
@@ -212,7 +227,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         # Dataloader depends on the tokenizer and loss_fn and should be
         # setup after all of these are setup
-        self._sampler, self._dataloader = self._setup_data(
+        self._sampler, self._train_dataloader, self._valid_dataloader = self._setup_data(
             cfg_dataset=cfg.dataset,
             shuffle=cfg.shuffle,
             batch_size=cfg.batch_size,
@@ -226,7 +241,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         # for logging and tracking training state. This should be computed after the dataloader
         # has been setup
         self._steps_per_epoch = (
-            len(self._dataloader) // self._gradient_accumulation_steps
+            len(self._train_dataloader) // self._gradient_accumulation_steps
         )
         if (
             self.max_steps_per_epoch is not None
@@ -354,6 +369,9 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             ds = config.instantiate(cfg_dataset, tokenizer=self._tokenizer)
             packed = cfg_dataset.get("packed", False)
 
+        # ds = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
+        # ds = ds.map(lambda examples: self._tokenizer(examples['text']), batched = True)
+
         sampler = DistributedSampler(
             ds,
             num_replicas=1,
@@ -361,10 +379,42 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             shuffle=shuffle,
             seed=0,
         )
-        dataloader = DataLoader(
-            dataset=ds,
-            sampler=sampler,
+        # dataloader = DataLoader(
+        #     dataset=ds,
+        #     sampler=sampler,
+        #     batch_size=batch_size,
+        #     collate_fn=partial(
+        #         utils.padded_collate,
+        #         padding_idx=self._tokenizer.pad_id,
+        #         ignore_idx=self._loss_fn.ignore_index,
+        #     )
+        #     if not packed
+        #     else None,
+        # )
+        validation_split = .2
+        dataset_size = len(ds)
+        indices = list(range(dataset_size))
+        split = int(np.floor(validation_split * dataset_size))
+        train_indices, val_indices = indices[split:], indices[:split]
+        train_sampler = SubsetRandomSampler(train_indices)
+        valid_sampler = SubsetRandomSampler(val_indices)
+        train_loader = DataLoader(
+            dataset=ds, 
             batch_size=batch_size,
+            sampler=train_sampler,
+            collate_fn=partial(
+                utils.padded_collate,
+                padding_idx=self._tokenizer.pad_id,
+                ignore_idx=self._loss_fn.ignore_index,
+            )
+            if not packed
+            else None,
+        )
+        
+        validation_loader = DataLoader(
+            dataset=ds, 
+            batch_size=batch_size,
+            sampler=valid_sampler,
             collate_fn=partial(
                 utils.padded_collate,
                 padding_idx=self._tokenizer.pad_id,
@@ -376,7 +426,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         log.info("Dataset and Sampler are initialized.")
 
-        return sampler, dataloader
+        return sampler, train_loader, validation_loader
 
     def save_checkpoint(self, epoch: int) -> None:
         """
@@ -451,6 +501,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         t0 = time.perf_counter()
         running_loss = 0
         num_tokens = 0
+        validation_loss = 0
 
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
         for curr_epoch in range(self.epochs_run, self.total_epochs):
@@ -461,7 +512,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             # Optionally profile the training loop
             with self._profiler:
                 pbar = tqdm(total=self._steps_per_epoch)
-                for idx, batch in enumerate(self._dataloader):
+                for idx, batch in enumerate(self._train_dataloader):
                     if (
                         self.max_steps_per_epoch is not None
                         and (idx // self._gradient_accumulation_steps)
@@ -496,6 +547,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                     loss = self._loss_fn(logits, labels)
                     loss = loss / self._gradient_accumulation_steps
                     running_loss += loss
+                    # wandb.log({"loss": loss})
                     loss.backward()
 
                     # Step with optimizer
@@ -531,14 +583,75 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 log_dict,
                                 step=self.global_step,
                             )
-
+                            wandb.log(log_dict)
+                        
                         # Reset running stats for the next step
                         running_loss = 0
                         num_tokens = 0
                         t0 = time.perf_counter()
+                
+                self._model.eval()
+                with torch.no_grad():
+                    for data in self._valid_dataloader:
+                        # Both are shape [b, s]
+                        # tokens, labels = batch["tokens"], batch["labels"]
+                        # # Get the attention mask and position ids from the dataset if they
+                        # # exist. Currently, only sample packing in PackedDataset returns these
+                        # mask = batch.get("mask", None)  # shape [b, s, s]
+                        # input_pos = batch.get("input_pos", None)  # shape [b, s]
 
-            self.epochs_run += 1
-            self.save_checkpoint(epoch=curr_epoch)
+                        # tokens = tokens.to(self._device)
+                        # num_tokens += tokens.numel()
+                        input_pos, labels = data
+                        labels = labels.to(self._device)
+                        # mask = mask.to(self._device) if mask is not None else None
+                        input_pos = (
+                            input_pos.to(self._device) if input_pos is not None else None
+                        )
+
+                        logits = self._model( input_pos=input_pos)
+                        # Shift so that tokens < n predict n
+                        logits = logits[..., :-1, :].contiguous()
+                        labels = labels[..., 1:].contiguous()
+                        logits = logits.transpose(1, 2)
+                        # Compute validation loss
+                        valloss = self._loss_fn(logits, labels)
+                        valloss = valloss / self._gradient_accumulation_steps
+                        validation_loss += valloss
+                        # log_dict["validation_loss"]=validation_loss.item()
+
+                        # wandb.log({"validation_loss":validation_loss.item()})
+                        print("validation loss: ", validation_loss)
+                        # valloss.backward()
+                        validation_loss = 0
+
+        
+            # Reset running stats for the next step
+            
+            
+            # # Compute validation loss                    
+            # # evaluate on the validation set
+            # correct = 0
+            # total = 0
+            # val_loss = 0.0
+            # self.eval()
+            # with torch.no_grad():
+            #     for data in validation_loader:
+            #         images, labels = data
+            #         images = images.to(device)
+            #         labels = labels.to(device)
+
+            #         outputs = self(images)
+            #         _, predicted = torch.max(outputs.data, 1)
+            #         total += labels.size(0)
+            #         correct += (predicted == labels).sum().item()
+            #         val_loss += self._loss_fn(outputs, labels).item() * labels.size(0)
+
+            # # Calculate the validation accuracy and validation loss
+            # val_accuracy = 100 * correct / total
+            # val_loss /= len(valid_dataloader.dataset)
+        self.epochs_run += 1
+        self.save_checkpoint(epoch=curr_epoch)
 
     def cleanup(self) -> None:
         self._metric_logger.close()
@@ -556,9 +669,11 @@ def recipe_main(cfg: DictConfig) -> None:
     config.log_config(recipe_name="LoRAFinetuneRecipeSingleDevice", cfg=cfg)
     recipe = LoRAFinetuneRecipeSingleDevice(cfg=cfg)
     recipe.setup(cfg=cfg)
-    recipe.train()
+    recipe.train()   
     recipe.cleanup()
 
 
 if __name__ == "__main__":
     sys.exit(recipe_main())
+
+wandb.finish()

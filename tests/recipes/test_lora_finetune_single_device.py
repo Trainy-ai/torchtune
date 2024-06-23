@@ -3,6 +3,8 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+# import wandb
+# wandb.init()
 
 import os
 import runpy
@@ -148,6 +150,7 @@ class TestLoRAFinetuneSingleDeviceRecipe:
         torch.testing.assert_close(
             loss_values, expected_loss_values, rtol=1e-4, atol=1e-4
         )
+        # wandb.log({"loss":loss_values})
 
     @pytest.mark.integration_test
     def test_training_state_on_resume(self, tmpdir, monkeypatch):
@@ -217,6 +220,7 @@ class TestLoRAFinetuneSingleDeviceRecipe:
         torch.testing.assert_close(
             loss_values, expected_loss_values, rtol=1e-5, atol=1e-5
         )
+        # wandb.log({"loss": loss_values})
 
     @pytest.mark.integration_test
     def test_save_and_load_merged_weights(self, tmpdir, monkeypatch):
@@ -272,3 +276,5 @@ class TestLoRAFinetuneSingleDeviceRecipe:
         llama2_model.load_state_dict(sd)
         merged_ckpt_out = llama2_model(inputs)
         torch.testing.assert_close(baseline_out, merged_ckpt_out, rtol=1e-5, atol=1e-5)
+
+# wandb.finish()
