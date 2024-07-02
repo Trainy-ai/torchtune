@@ -14,7 +14,9 @@ from datasets import load_dataset
 from functools import partial
 from typing import Any, Dict, Optional, Tuple
 from warnings import warn
-from eleuther_eval import EleutherEvalRecipe
+# from eleuther_eval import EleutherEvalRecipe
+# sys.path.append('/home/paperspace/torchtune/recipes')
+
 import torch
 from omegaconf import DictConfig, ListConfig
 import numpy as np
@@ -657,8 +659,20 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             # # Calculate the validation accuracy and validation loss
             # val_accuracy = 100 * correct / total
             # val_loss /= len(valid_dataloader.dataset)
-        self.epochs_run += 1
-        self.save_checkpoint(epoch=curr_epoch)
+            self.save_checkpoint(epoch=curr_epoch)
+            self.evaluate_model()
+            self.epochs_run += 1
+    def evaluate_model(self):
+        # Load the configuration for evaluation
+        with open("/mnt/data/eleuther_evaluation.yaml", "r") as f:
+            eval_cfg = yaml.safe_load(f)
+
+        eval_recipe = EleutherEvalRecipe(DictConfig(eval_cfg))
+        eval_recipe.setup()
+        eval_recipe.evaluate()
+        wandb.log({"evaluation": eval_recipe.output})
+        log.info("Evaluation completed and logged.")
+
 
     def cleanup(self) -> None:
         self._metric_logger.close()
