@@ -6,7 +6,7 @@
 
 import sys
 import time
-
+sys.path.append('/home/paperspace/torchtune/recipes')
 from typing import Any, Dict, List, Tuple, Union
 
 import torch
@@ -19,7 +19,16 @@ from torchtune import config, utils
 from torchtune.modules import TransformerDecoder
 from torchtune.modules.tokenizers import Tokenizer
 from torchtune.recipe_interfaces import EvalRecipeInterface
+import wandb 
 
+wandb.init(
+    project="llama3_eval",
+    name = "test 1",
+    config={
+    "epochs": 5,
+    "batch-size": 2,
+    }
+)
 
 logger = utils.get_logger("DEBUG")
 
@@ -253,6 +262,10 @@ class EleutherEvalRecipe(EvalRecipeInterface):
 
         formatted_output = make_table(output)
         print(formatted_output)
+        # print(output.get())
+        # print(output.values)
+        wandb.log(output['results']['truthfulqa_mc2'])
+        # wandb.log(output)
 
 
 @config.parse
@@ -266,3 +279,5 @@ def recipe_main(cfg: DictConfig) -> None:
 
 if __name__ == "__main__":
     sys.exit(recipe_main())
+
+wandb.finish()

@@ -7,14 +7,14 @@
 import os
 import sys
 import time
-
-# from datasets import load_dataset
+import yaml 
+from datasets import load_dataset
 # from transformers import AutoTokenizer
 
 from functools import partial
 from typing import Any, Dict, Optional, Tuple
 from warnings import warn
-
+from eleuther_eval import EleutherEvalRecipe
 import torch
 from omegaconf import DictConfig, ListConfig
 import numpy as np
@@ -32,18 +32,18 @@ from torchtune.modules.peft.peft_utils import (
 )
 from torchtune.recipe_interfaces import FTRecipeInterface
 from tqdm import tqdm
-import wandb
-wandb.init(
-    # set the wandb project where this run will be logged
-    project="torchtune",
-    name = "batch:2 epoch:5 lr:3e-4 samsum",
+# import wandb
+# wandb.init(
+#     # set the wandb project where this run will be logged
+#     project="torchtune1",
+#     name = "July 2 test 1",
 
-    # track hyperparameters and run metadata
-    config={
-    "epochs": 5,
-    "batch-size": 10,
-    }
-)
+#     # track hyperparameters and run metadata
+#     config={
+#     "epochs": 5,
+#     "batch-size": 2,
+#     }
+# )
 
 log = utils.get_logger("DEBUG")
 
@@ -222,12 +222,13 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             ),
         )
 
+
         self._loss_fn = config.instantiate(cfg.loss)
         log.info("Loss is initialized.")
 
         # Dataloader depends on the tokenizer and loss_fn and should be
         # setup after all of these are setup
-        self._sampler, self._train_dataloader, self._valid_dataloader = self._setup_data(
+        self._sampler, self._dataloader= self._setup_data(
             cfg_dataset=cfg.dataset,
             shuffle=cfg.shuffle,
             batch_size=cfg.batch_size,
@@ -241,7 +242,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         # for logging and tracking training state. This should be computed after the dataloader
         # has been setup
         self._steps_per_epoch = (
-            len(self._train_dataloader) // self._gradient_accumulation_steps
+            len(self._dataloader) // self._gradient_accumulation_steps
         )
         if (
             self.max_steps_per_epoch is not None
@@ -364,10 +365,14 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                 for single_cfg_dataset in cfg_dataset
             ]
             ds = ConcatDataset(datasets=datasets)
+            # ds = load_dataset("cais/mmlu", "all")
             packed = False
         else:
             ds = config.instantiate(cfg_dataset, tokenizer=self._tokenizer)
+            # ds = load_dataset("cais/mmlu", "all")
             packed = cfg_dataset.get("packed", False)
+        
+
 
         # ds = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
         # ds = ds.map(lambda examples: self._tokenizer(examples['text']), batched = True)
@@ -379,10 +384,29 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             shuffle=shuffle,
             seed=0,
         )
-        # dataloader = DataLoader(
-        #     dataset=ds,
-        #     sampler=sampler,
+        dataloader = DataLoader(
+            dataset=ds,
+            sampler=sampler,
+            batch_size=batch_size,
+            collate_fn=partial(
+                utils.padded_collate,
+                padding_idx=self._tokenizer.pad_id,
+                ignore_idx=self._loss_fn.ignore_index,
+            )
+            if not packed
+            else None,
+        )
+        # validation_split = .2
+        # dataset_size = len(ds)
+        # indices = list(range(dataset_size))
+        # split = int(np.floor(validation_split * dataset_size))
+        # train_indices, val_indices = indices[split:], indices[:split]
+        # train_sampler = SubsetRandomSampler(train_indices)
+        # valid_sampler = SubsetRandomSampler(val_indices)
+        # train_loader = DataLoader(
+        #     dataset=ds, 
         #     batch_size=batch_size,
+        #     sampler=train_sampler,
         #     collate_fn=partial(
         #         utils.padded_collate,
         #         padding_idx=self._tokenizer.pad_id,
@@ -391,42 +415,23 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         #     if not packed
         #     else None,
         # )
-        validation_split = .2
-        dataset_size = len(ds)
-        indices = list(range(dataset_size))
-        split = int(np.floor(validation_split * dataset_size))
-        train_indices, val_indices = indices[split:], indices[:split]
-        train_sampler = SubsetRandomSampler(train_indices)
-        valid_sampler = SubsetRandomSampler(val_indices)
-        train_loader = DataLoader(
-            dataset=ds, 
-            batch_size=batch_size,
-            sampler=train_sampler,
-            collate_fn=partial(
-                utils.padded_collate,
-                padding_idx=self._tokenizer.pad_id,
-                ignore_idx=self._loss_fn.ignore_index,
-            )
-            if not packed
-            else None,
-        )
         
-        validation_loader = DataLoader(
-            dataset=ds, 
-            batch_size=batch_size,
-            sampler=valid_sampler,
-            collate_fn=partial(
-                utils.padded_collate,
-                padding_idx=self._tokenizer.pad_id,
-                ignore_idx=self._loss_fn.ignore_index,
-            )
-            if not packed
-            else None,
-        )
+        # validation_loader = DataLoader(
+        #     dataset=ds, 
+        #     batch_size=batch_size,
+        #     sampler=valid_sampler,
+        #     collate_fn=partial(
+        #         utils.padded_collate,
+        #         padding_idx=self._tokenizer.pad_id,
+        #         ignore_idx=self._loss_fn.ignore_index,
+        #     )
+        #     if not packed
+        #     else None,
+        # )
 
         log.info("Dataset and Sampler are initialized.")
-
-        return sampler, train_loader, validation_loader
+        return sampler, dataloader
+        # return sampler, train_loader, validation_loader
 
     def save_checkpoint(self, epoch: int) -> None:
         """
@@ -501,7 +506,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         t0 = time.perf_counter()
         running_loss = 0
         num_tokens = 0
-        validation_loss = 0
+        # validation_loss = 0
 
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
         for curr_epoch in range(self.epochs_run, self.total_epochs):
@@ -512,7 +517,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             # Optionally profile the training loop
             with self._profiler:
                 pbar = tqdm(total=self._steps_per_epoch)
-                for idx, batch in enumerate(self._train_dataloader):
+                for idx, batch in enumerate(self._dataloader):
                     if (
                         self.max_steps_per_epoch is not None
                         and (idx // self._gradient_accumulation_steps)
@@ -583,47 +588,49 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 log_dict,
                                 step=self.global_step,
                             )
-                            wandb.log(log_dict)
+                            # wandb.log(log_dict)
                         
                         # Reset running stats for the next step
                         running_loss = 0
                         num_tokens = 0
                         t0 = time.perf_counter()
                 
-                self._model.eval()
-                with torch.no_grad():
-                    for data in self._valid_dataloader:
-                        # Both are shape [b, s]
-                        # tokens, labels = batch["tokens"], batch["labels"]
-                        # # Get the attention mask and position ids from the dataset if they
-                        # # exist. Currently, only sample packing in PackedDataset returns these
-                        # mask = batch.get("mask", None)  # shape [b, s, s]
-                        # input_pos = batch.get("input_pos", None)  # shape [b, s]
+                # valid_loss = EleutherEvalRecipe.evaluate(load_config('eleuther_evaluation.yaml'))
+                # wandb.log(valid_loss)
+                # self._model.eval()
+                # with torch.no_grad():
+                #     for data in self._valid_dataloader:
+                #         # Both are shape [b, s]
+                #         # tokens, labels = batch["tokens"], batch["labels"]
+                #         # # Get the attention mask and position ids from the dataset if they
+                #         # # exist. Currently, only sample packing in PackedDataset returns these
+                #         # mask = batch.get("mask", None)  # shape [b, s, s]
+                #         # input_pos = batch.get("input_pos", None)  # shape [b, s]
 
-                        # tokens = tokens.to(self._device)
-                        # num_tokens += tokens.numel()
-                        input_pos, labels = data
-                        labels = labels.to(self._device)
-                        # mask = mask.to(self._device) if mask is not None else None
-                        input_pos = (
-                            input_pos.to(self._device) if input_pos is not None else None
-                        )
+                #         # tokens = tokens.to(self._device)
+                #         # num_tokens += tokens.numel()
+                #         input_pos, labels = data
+                #         labels = labels.to(self._device)
+                #         # mask = mask.to(self._device) if mask is not None else None
+                #         input_pos = (
+                #             input_pos.to(self._device) if input_pos is not None else None
+                #         )
 
-                        logits = self._model( input_pos=input_pos)
-                        # Shift so that tokens < n predict n
-                        logits = logits[..., :-1, :].contiguous()
-                        labels = labels[..., 1:].contiguous()
-                        logits = logits.transpose(1, 2)
-                        # Compute validation loss
-                        valloss = self._loss_fn(logits, labels)
-                        valloss = valloss / self._gradient_accumulation_steps
-                        validation_loss += valloss
-                        # log_dict["validation_loss"]=validation_loss.item()
+                #         logits = self._model( input_pos=input_pos)
+                #         # Shift so that tokens < n predict n
+                #         logits = logits[..., :-1, :].contiguous()
+                #         labels = labels[..., 1:].contiguous()
+                #         logits = logits.transpose(1, 2)
+                #         # Compute validation loss
+                #         valloss = self._loss_fn(logits, labels)
+                #         valloss = valloss / self._gradient_accumulation_steps
+                #         validation_loss += valloss
+                #         # log_dict["validation_loss"]=validation_loss.item()
 
-                        # wandb.log({"validation_loss":validation_loss.item()})
-                        print("validation loss: ", validation_loss)
-                        # valloss.backward()
-                        validation_loss = 0
+                #         # wandb.log({"validation_loss":validation_loss.item()})
+                #         print("validation loss: ", validation_loss)
+                #         # valloss.backward()
+                #         validation_loss = 0
 
         
             # Reset running stats for the next step
@@ -656,6 +663,24 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
     def cleanup(self) -> None:
         self._metric_logger.close()
 
+    # def mmlu_dataset(self, 
+    # tokenizer: config.instantiate(cfg.tokenizer),
+    # max_seq_len: int = 1024,
+    # ) -> PreferenceDataset:
+    #     return PreferenceDataset(
+    #         tokenizer=tokenizer,
+    #         source="cais/mmlu",
+    #         # template=StackExchangedPairedTemplate(),
+    #         column_map={
+    #             "prompt": "question",
+    #             "choice": "choices",
+    #             "answer": "answer",
+    #         },
+    #         max_seq_len=max_seq_len,
+    #         split="train",
+    #         data_dir="data/rl",
+    #     )
+
 
 @config.parse
 def recipe_main(cfg: DictConfig) -> None:
@@ -676,4 +701,6 @@ def recipe_main(cfg: DictConfig) -> None:
 if __name__ == "__main__":
     sys.exit(recipe_main())
 
-wandb.finish()
+
+
+# wandb.finish()
