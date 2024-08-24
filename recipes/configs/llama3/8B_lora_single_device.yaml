@@ -24,7 +24,12 @@ model:
   apply_lora_to_output: False
   lora_rank: 8
   lora_alpha: 16
+  # compile: true
+#  _model_compiler: True  
 
+torch_compile: True
+torch_compile_backend: inductor
+torch_compile_mode: None
 # Tokenizer
 tokenizer:
   _component_: torchtune.models.llama3.llama3_tokenizer
@@ -54,7 +59,7 @@ dataset:
 
 seed: null
 shuffle: True
-batch_size: 2
+batch_size: 4
 
 # Optimizer and Scheduler
 optimizer:
@@ -69,10 +74,10 @@ loss:
   _component_: torch.nn.CrossEntropyLoss
 
 # Training
-epochs: 2
+epochs: 1
 max_steps_per_epoch: null
 gradient_accumulation_steps: 64
-compile: False
+compile: True
 
 # Logging
 output_dir: /tmp/lora_finetune_output
@@ -91,4 +96,4 @@ enable_activation_checkpointing: True
 # Profiler (disabled)
 profiler:
   _component_: torchtune.utils.profiler
-  enabled: False
+  enabled: True

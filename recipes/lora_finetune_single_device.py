@@ -660,18 +660,18 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             # val_accuracy = 100 * correct / total
             # val_loss /= len(valid_dataloader.dataset)
             self.save_checkpoint(epoch=curr_epoch)
-            self.evaluate_model()
+            # self.evaluate_model()
             self.epochs_run += 1
-    def evaluate_model(self):
-        # Load the configuration for evaluation
-        with open("/mnt/data/eleuther_evaluation.yaml", "r") as f:
-            eval_cfg = yaml.safe_load(f)
+    # def evaluate_model(self):
+    #     # Load the configuration for evaluation
+    #     with open("/mnt/data/eleuther_evaluation.yaml", "r") as f:
+    #         eval_cfg = yaml.safe_load(f)
 
-        eval_recipe = EleutherEvalRecipe(DictConfig(eval_cfg))
-        eval_recipe.setup()
-        eval_recipe.evaluate()
-        wandb.log({"evaluation": eval_recipe.output})
-        log.info("Evaluation completed and logged.")
+    #     eval_recipe = EleutherEvalRecipe(DictConfig(eval_cfg))
+    #     eval_recipe.setup()
+    #     eval_recipe.evaluate()
+    #     wandb.log({"evaluation": eval_recipe.output})
+    #     log.info("Evaluation completed and logged.")
 
 
     def cleanup(self) -> None:
@@ -695,7 +695,24 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
     #         data_dir="data/rl",
     #     )
 
+# lora = LoRAFinetuneRecipeSingleDevice()
+# opt_lora = torch.compile(lora)
 
+# class MyLora(LoRAFinetuneRecipeSingleDevice):
+#     def __init__(self, cfg):
+#         super().__init__(cfg)
+#         self.lin = torch.nn.Linear(100, 10)
+
+#     def forward(self, x):
+#         return torch.nn.functional.relu(self.lin(x))
+
+# # lora = MyLora(cfg)
+# # opt_lora = torch.compile(lora)
+
+# def opt_lora(cfg):
+#     lora = MyLora(cfg)
+#     return torch.compile(lora)
+    
 @config.parse
 def recipe_main(cfg: DictConfig) -> None:
     """
@@ -707,6 +724,7 @@ def recipe_main(cfg: DictConfig) -> None:
     """
     config.log_config(recipe_name="LoRAFinetuneRecipeSingleDevice", cfg=cfg)
     recipe = LoRAFinetuneRecipeSingleDevice(cfg=cfg)
+    # recipe = opt_lora(cfg=cfg)
     recipe.setup(cfg=cfg)
     recipe.train()   
     recipe.cleanup()
